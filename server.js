@@ -1,0 +1,103 @@
+const express = require("express");
+const cors = require("cors");
+const path = require("path");
+const querystring = require("querystring");
+const dotenv = require("dotenv");
+
+const helmet = require("helmet");
+const { addonInterface, subtitlesHandler } = require("./addon");
+const SubsRoClient = require("./lib/subsro");
+const proxyRouter = require("./lib/proxy");
+
+dotenv.config();
+
+const app = express();
+const PORT = process.env.PORT || 7000;
+
+app.use(
+  helmet({
+    contentSecurityPolicy: false, // Disable CSP to allow custom configuration page scripts/styles
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
+app.use(cors());
+app.use(express.static(path.join(__dirname, "public")));
+app.use(proxyRouter);
+
+const decodeConfig = (configStr) => {
+  if (!configStr) return {};
+  try {
+    const base64 = configStr
+      .replace(/-/g, "+")
+      .replace(/_/g, "/")
+      .padEnd(configStr.length + ((4 - (configStr.length % 4)) % 4), "=");
+    return JSON.parse(Buffer.from(base64, "base64").toString("utf-8"));
+  } catch (e) {
+    return {};
+  }
+};
+
+app.get("/", (req, res) => res.redirect("/configure.html"));
+app.get("/:config/configure", (req, res) => res.redirect("/configure.html"));
+
+// Manifest
+app.get("/:config?/manifest.json", (req, res) => {
+  const { config } = req.params;
+  const userConfig = decodeConfig(config);
+  const hasConfig = config && Object.keys(userConfig).length > 0;
+
+  // Shallow clone with spread (40× faster than JSON.parse/stringify)
+  const manifest = {
+    ...addonInterface.manifest,
+    behaviorHints: {
+      ...addonInterface.manifest.behaviorHints,
+      configurationRequired: !hasConfig,
+    },
+  };
+
+  res.set("Cache-Control", "public, max-age=86400"); // 1 day
+  res.json(manifest);
+});
+
+// API Validation Endpoint
+app.get("/api/validate/:apiKey", async (req, res) => {
+  const { apiKey } = req.params;
+  const client = new SubsRoClient(apiKey);
+  const isValid = await client.validate();
+  res.json({ valid: isValid });
+});
+
+// Subtitles
+app.get("/:config?/subtitles/:type/:id/:extra?.json", async (req, res) => {
+  const { config, type, id, extra } = req.params;
+  const userConfig = decodeConfig(config);
+
+  const protocol = req.headers["x-forwarded-proto"] || req.protocol;
+  const host = req.headers["x-forwarded-host"] || req.get("host");
+  userConfig.baseUrl = `${protocol}://${host}`;
+
+  try {
+    let extraObj = {};
+    if (extra) {
+      try {
+        extraObj = JSON.parse(extra);
+      } catch (e) {
+        extraObj = querystring.parse(extra);
+      }
+    }
+    const response = await subtitlesHandler({
+      type,
+      id,
+      extra: extraObj,
+      config: userConfig,
+    });
+    res.set("Cache-Control", "public, max-age=900"); // 15 minutes
+    res.json(response);
+  } catch (e) {
+    res.status(500).json({ subtitles: [] });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`🚀 Addon live on port ${PORT}`);
+});
