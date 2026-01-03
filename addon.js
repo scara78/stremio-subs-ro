@@ -1,12 +1,13 @@
 const { addonBuilder } = require("stremio-addon-sdk");
 const SubsRoClient = require("./lib/subsro");
+const { matchesEpisode, tokenSimilarity } = require("./lib/matcher");
 const manifest = require("./manifest");
 
 const builder = new addonBuilder(manifest);
 
 // --- CACHE SYSTEM ---
-const CACHE = new Map(); // IMDB_ID -> { data, timestamp, ttl }
-const PENDING_REQUESTS = new Map(); // IMDB_ID -> Promise
+const CACHE = new Map(); // cacheKey -> { data, timestamp, ttl }
+const PENDING_REQUESTS = new Map(); // cacheKey -> Promise
 const CLIENT_CACHE = new Map(); // apiKey -> SubsRoClient instance
 const CACHE_TTL = 15 * 60 * 1000; // 15 minutes (Standard navigation cache)
 const EMPTY_CACHE_TTL = 60 * 1000; // 1 minute for "no results"
@@ -33,11 +34,30 @@ const LANGUAGE_MAPPING = {
   alt: "und", // Undetermined (for "other")
 };
 
-const subtitlesHandler = async ({ type, id, config }) => {
+/**
+ * Parse Stremio ID to extract IMDB ID, season, and episode.
+ * Format: tt1234567:1:5 (IMDB:season:episode)
+ */
+function parseStremioId(id) {
+  const parts = id.split(":");
+  return {
+    imdbId: parts[0],
+    season: parts[1] ? parseInt(parts[1], 10) : null,
+    episode: parts[2] ? parseInt(parts[2], 10) : null,
+  };
+}
+
+const subtitlesHandler = async ({ type, id, extra, config }) => {
   if (!config || !config.apiKey) return { subtitles: [] };
 
-  const imdbId = id.split(":")[0];
-  const cacheKey = `${imdbId}_${config.languages || "all"}`;
+  const { imdbId, season, episode } = parseStremioId(id);
+  const isSeries = type === "series" && episode !== null;
+  const videoFilename = extra?.filename || "";
+
+  // Include season/episode in cache key for series
+  const cacheKey = isSeries
+    ? `${imdbId}_s${season}e${episode}_${config.languages || "all"}`
+    : `${imdbId}_${config.languages || "all"}`;
 
   // 1. Check Cache
   const cached = CACHE.get(cacheKey);
@@ -55,7 +75,7 @@ const subtitlesHandler = async ({ type, id, config }) => {
       const subsRo = getClient(config.apiKey);
       const results = await subsRo.searchByImdb(imdbId);
 
-      // Filter
+      // Filter by language
       let filtered = results;
       if (config.languages && config.languages.length > 0) {
         filtered = results.filter((sub) =>
@@ -63,12 +83,45 @@ const subtitlesHandler = async ({ type, id, config }) => {
         );
       }
 
-      // Map
+      // Filter by episode for series
+      if (isSeries) {
+        filtered = filtered.filter((sub) => {
+          // Check both description and title for episode match
+          const searchText = `${sub.description || ""} ${sub.title || ""}`;
+          return matchesEpisode(searchText, season, episode);
+        });
+        console.log(
+          `[SUBS] Series ${imdbId} S${season}E${episode}: ${results.length} -> ${filtered.length} after episode filter`
+        );
+      }
+
+      // Rank by filename similarity if videoFilename is available
+      if (videoFilename && filtered.length > 1) {
+        filtered.sort((a, b) => {
+          const scoreA = tokenSimilarity(
+            videoFilename,
+            a.description || a.title || ""
+          );
+          const scoreB = tokenSimilarity(
+            videoFilename,
+            b.description || b.title || ""
+          );
+          return scoreB - scoreA; // Higher score first
+        });
+      }
+
+      // Map to Stremio subtitle format
       const baseUrl =
         config.baseUrl || process.env.BASE_URL || "http://localhost:7000";
+
+      // Encode filename for URL (base64url-safe)
+      const encodedFilename = videoFilename
+        ? Buffer.from(videoFilename).toString("base64url")
+        : "_";
+
       const subtitles = filtered.map((sub) => ({
         id: `subsro_${sub.id}`,
-        url: `${baseUrl}/${config.apiKey}/proxy/${sub.id}/sub.vtt`,
+        url: `${baseUrl}/${config.apiKey}/proxy/${sub.id}/${encodedFilename}/sub.vtt`,
         lang: LANGUAGE_MAPPING[sub.language] || sub.language,
       }));
 
@@ -80,7 +133,9 @@ const subtitlesHandler = async ({ type, id, config }) => {
       });
 
       console.log(
-        `[SUBS] Served ${subtitles.length} subs for ${imdbId} (Cache: MISS)`
+        `[SUBS] Served ${subtitles.length} subs for ${imdbId}${
+          isSeries ? ` S${season}E${episode}` : ""
+        } (Cache: MISS)`
       );
       return { subtitles };
     } catch (error) {
