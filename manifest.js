@@ -5,10 +5,14 @@ const manifest = {
   description: "Romanian subtitles from Subs.ro (unofficial)",
   logo: "https://raw.githubusercontent.com/allecsc/stremio-subs-ro/refs/heads/master/public/logo.png",
   catalogs: [],
-  resources: ["subtitles"],
-  types: ["movie", "series"],
-  idPrefixes: ["tt"],
-
+  resources: [
+    {
+      name: "subtitles",
+      types: ["movie", "series"],
+      idPrefixes: ["tt"],
+    },
+  ],
+  types: ["subtitles"],
   behaviorHints: {
     configurable: true,
     configurationRequired: true,
