@@ -1,6 +1,6 @@
 # Subs.ro Subtitles for Stremio
 
-[![Version](https://img.shields.io/badge/Version-1.0.0-blue.svg)](https://github.com/allecsc/stremio-subs-ro) [![Maintained](https://img.shields.io/badge/Maintained-yes-green.svg)](https://github.com/allecsc/stremio-subs-ro/graphs/commit-activity)
+[![Version](https://img.shields.io/badge/Version-1.0.1-blue.svg)](https://github.com/allecsc/stremio-subs-ro) [![Maintained](https://img.shields.io/badge/Maintained-yes-green.svg)](https://github.com/allecsc/stremio-subs-ro/graphs/commit-activity)
 
 **[English](#english)** | **[Română](#română)**
 
