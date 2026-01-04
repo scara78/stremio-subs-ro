@@ -1,18 +1,20 @@
 const { addonBuilder } = require("stremio-addon-sdk");
 const SubsRoClient = require("./lib/subsro");
-const { matchesEpisode, tokenSimilarity } = require("./lib/matcher");
+const { matchesEpisode, calculateMatchScore } = require("./lib/matcher");
+const { listSrtFiles, getArchiveType } = require("./lib/archiveUtils");
+const { globalLimiter } = require("./lib/rateLimiter");
 const manifest = require("./manifest");
 
 const builder = new addonBuilder(manifest);
 
 // --- CACHE SYSTEM ---
-const CACHE = new Map(); // cacheKey -> { data, timestamp, ttl }
-const PENDING_REQUESTS = new Map(); // cacheKey -> Promise
-const CLIENT_CACHE = new Map(); // apiKey -> SubsRoClient instance
-const CACHE_TTL = 15 * 60 * 1000; // 15 minutes (Standard navigation cache)
-const EMPTY_CACHE_TTL = 60 * 1000; // 1 minute for "no results"
+const { ARCHIVE_CACHE, ARCHIVE_CACHE_TTL } = require("./lib/archiveCache");
+const CACHE = new Map();
+const PENDING_REQUESTS = new Map();
+const CLIENT_CACHE = new Map();
+const CACHE_TTL = 15 * 60 * 1000;
+const EMPTY_CACHE_TTL = 60 * 1000;
 
-// Get or create cached client instance
 const getClient = (apiKey) => {
   if (!CLIENT_CACHE.has(apiKey)) {
     CLIENT_CACHE.set(apiKey, new SubsRoClient(apiKey));
@@ -21,23 +23,18 @@ const getClient = (apiKey) => {
 };
 
 const LANGUAGE_MAPPING = {
-  // subs.ro code -> ISO 639-2 (Stremio expects)
-  ro: "ron", // Romanian (ISO 639-2)
-  en: "eng", // English
-  ita: "ita", // Italian
-  fra: "fra", // French
-  ger: "deu", // German (ISO 639-2)
-  ung: "hun", // Hungarian
-  gre: "ell", // Greek (Modern, ISO 639-2)
-  por: "por", // Portuguese
-  spa: "spa", // Spanish
-  alt: "und", // Undetermined (for "other")
+  ro: "ron",
+  en: "eng",
+  ita: "ita",
+  fra: "fra",
+  ger: "deu",
+  ung: "hun",
+  gre: "ell",
+  por: "por",
+  spa: "spa",
+  alt: "und",
 };
 
-/**
- * Parse Stremio ID to extract IMDB ID, season, and episode.
- * Format: tt1234567:1:5 (IMDB:season:episode)
- */
 function parseStremioId(id) {
   const parts = id.split(":");
   return {
@@ -47,14 +44,62 @@ function parseStremioId(id) {
   };
 }
 
+/**
+ * Download archive via rate limiter and list SRT files.
+ * Uses caching to avoid redundant downloads.
+ */
+async function getArchiveSrtList(apiKey, subId) {
+  const cacheKey = `archive_${subId}`;
+  const cached = ARCHIVE_CACHE.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < ARCHIVE_CACHE_TTL) {
+    return cached.srtFiles;
+  }
+
+  try {
+    const downloadUrl = `https://subs.ro/api/v1.0/subtitle/${subId}/download`;
+
+    // Use rate limiter for safe, queued downloads
+    const buffer = await globalLimiter.downloadArchive(downloadUrl, {
+      headers: { "X-Subs-Api-Key": apiKey },
+    });
+
+    const srtFiles = await listSrtFiles(buffer);
+    const archiveType = getArchiveType(buffer);
+
+    ARCHIVE_CACHE.set(cacheKey, {
+      buffer,
+      srtFiles,
+      archiveType,
+      timestamp: Date.now(),
+    });
+
+    const status = globalLimiter.getQueueStatus();
+    const ts = new Date().toISOString().slice(11, 23);
+    console.log(
+      `[${ts}] [SUBS] Archive ${subId}: ${
+        srtFiles.length
+      } SRTs (${archiveType.toUpperCase()}) [Active: ${
+        status.activeDownloads
+      }, Pending: ${status.download}]`
+    );
+
+    return srtFiles;
+  } catch (error) {
+    console.error(`[SUBS] Error downloading archive ${subId}:`, error.message);
+    return [];
+  }
+}
+
 const subtitlesHandler = async ({ type, id, extra, config }) => {
   if (!config || !config.apiKey) return { subtitles: [] };
+
+  // Clear any pending requests from previous title
+  globalLimiter.clearQueues();
 
   const { imdbId, season, episode } = parseStremioId(id);
   const isSeries = type === "series" && episode !== null;
   const videoFilename = extra?.filename || "";
 
-  // Include season/episode in cache key for series
   const cacheKey = isSeries
     ? `${imdbId}_s${season}e${episode}_${config.languages || "all"}`
     : `${imdbId}_${config.languages || "all"}`;
@@ -75,67 +120,64 @@ const subtitlesHandler = async ({ type, id, extra, config }) => {
       const subsRo = getClient(config.apiKey);
       const results = await subsRo.searchByImdb(imdbId);
 
-      // Filter by language (if configured)
-      let filtered = results;
-      const languages = Array.isArray(config.languages)
-        ? config.languages
-        : config.languages
-        ? [config.languages]
-        : [];
-
-      if (languages.length > 0) {
-        filtered = results.filter((sub) => languages.includes(sub.language));
-      }
-
-      // Process results based on type
-      if (isSeries) {
-        const strictMatches = filtered.filter((sub) => {
-          const searchText = `${sub.description || ""} ${sub.title || ""}`;
-          return matchesEpisode(searchText, season, episode);
-        });
-
-        if (strictMatches.length > 0) {
-          console.log(
-            `[SUBS] Series ${imdbId} S${season}E${episode}: Found ${strictMatches.length} matching subs`
-          );
-          filtered = strictMatches;
-        } else if (filtered.length > 0) {
-          console.log(
-            `[SUBS] Series ${imdbId} S${season}E${episode}: No strict matches, serving all ${filtered.length} subs for this title as fallback`
-          );
-          // Keep all subs for this title as fallback
-        }
-      } else {
-        console.log(
-          `[SUBS] Movie ${imdbId}: Serving all ${filtered.length} subs for selected languages`
+      // Filter by language
+      let filteredResults = results;
+      if (config.languages && config.languages.length > 0) {
+        filteredResults = results.filter((sub) =>
+          config.languages.includes(sub.language)
         );
       }
 
-      // Rank by filename similarity if videoFilename is available
-      if (videoFilename && filtered.length > 1) {
-        filtered.sort((a, b) => {
-          const textA = `${a.title || ""} ${a.description || ""}`;
-          const textB = `${b.title || ""} ${b.description || ""}`;
-          const scoreA = tokenSimilarity(videoFilename, textA);
-          const scoreB = tokenSimilarity(videoFilename, textB);
-          return scoreB - scoreA; // Higher score first
-        });
-      }
-
-      // Map to Stremio subtitle format
       const baseUrl =
         config.baseUrl || process.env.BASE_URL || "http://localhost:7000";
 
-      // Encode filename for URL (base64url-safe)
-      const encodedFilename = videoFilename
-        ? Buffer.from(videoFilename).toString("base64url")
-        : "_";
+      const allSubtitles = [];
 
-      const subtitles = filtered.map((sub) => ({
-        id: `subsro_${sub.id}`,
-        url: `${baseUrl}/${config.apiKey}/proxy/${sub.id}/${encodedFilename}/sub.vtt`,
-        lang: LANGUAGE_MAPPING[sub.language] || sub.language,
-        name: sub.title || sub.description || "Subtitle",
+      // Process archives sequentially (rate limiter handles timing)
+      for (const sub of filteredResults) {
+        const srtFiles = await getArchiveSrtList(config.apiKey, sub.id);
+        const lang = LANGUAGE_MAPPING[sub.language] || sub.language;
+
+        for (const srtPath of srtFiles) {
+          // For series: filter out SRTs that don't match the episode
+          if (isSeries) {
+            if (!matchesEpisode(srtPath, season, episode)) {
+              continue;
+            }
+          }
+
+          const encodedSrtPath = Buffer.from(srtPath).toString("base64url");
+
+          // Calculate weighted match score (release group +50, source +20, base fuzzy)
+          const matchScore = calculateMatchScore(videoFilename, srtPath);
+
+          allSubtitles.push({
+            id: `subsro_${sub.id}_${encodedSrtPath.slice(0, 8)}`,
+            url: `${baseUrl}/${config.apiKey}/proxy/${sub.id}/${encodedSrtPath}/sub.vtt`,
+            lang,
+            srtPath,
+            matchScore,
+          });
+        }
+      }
+
+      // Sort by weighted match score (highest first)
+      allSubtitles.sort((a, b) => b.matchScore - a.matchScore);
+
+      // Log top matches for debugging
+      if (allSubtitles.length > 0 && videoFilename) {
+        const top = allSubtitles.slice(0, 5); // Show top 5
+        console.log(`[SUBS] Matching results for "${videoFilename}":`);
+        top.forEach((s, i) => {
+          console.log(`  ${i + 1}. [Score: ${s.matchScore}] ${s.srtPath}`);
+        });
+      }
+
+      // Remove internal properties before returning
+      const subtitles = allSubtitles.map(({ id, url, lang }) => ({
+        id,
+        url,
+        lang,
       }));
 
       // Store in Cache
@@ -145,9 +187,15 @@ const subtitlesHandler = async ({ type, id, extra, config }) => {
         ttl: subtitles.length > 0 ? CACHE_TTL : EMPTY_CACHE_TTL,
       });
 
+      console.log(
+        `[SUBS] Served ${subtitles.length} subs for ${imdbId}${
+          isSeries ? ` S${season}E${episode}` : ""
+        } (Status: OK)`
+      );
+
       return { subtitles };
     } catch (error) {
-      console.error(`[SUBS] Error for ${imdbId}:`, error.message);
+      // Errors are already logged by globalLimiter
       return { subtitles: [] };
     } finally {
       PENDING_REQUESTS.delete(cacheKey);
