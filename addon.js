@@ -117,11 +117,8 @@ const subtitlesHandler = async ({ type, id, extra, config }) => {
 
   const fetchTask = (async () => {
     try {
-      const ts = () => new Date().toISOString().slice(11, 23);
-      console.log(`[${ts()}] [SUBS] Searching for ${imdbId} (${type})`);
       const subsRo = getClient(config.apiKey);
       const results = await subsRo.searchByImdb(imdbId);
-      console.log(`[${ts()}] [SUBS] Found ${results.length} results from API`);
 
       // Filter by language
       let filteredResults = results;
@@ -131,8 +128,12 @@ const subtitlesHandler = async ({ type, id, extra, config }) => {
         );
       }
 
-      const baseUrl =
-        config.baseUrl || process.env.BASE_URL || "http://localhost:7000";
+      // BeamUp URL detection - hardcoded for production, dynamic for local dev
+      const BEAMUP_URL =
+        "https://cdcd7719a6b3-stremio-subs-ro.baby-beamup.club";
+      const baseUrl = process.env.NODE_ENV
+        ? BEAMUP_URL
+        : config.baseUrl || "http://localhost:7000";
 
       const allSubtitles = [];
 

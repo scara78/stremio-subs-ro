@@ -14,8 +14,6 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 7000;
 
-app.set("trust proxy", true); // Essential for BeamUp/Dokku proxies
-
 app.use(
   helmet({
     contentSecurityPolicy: false, // Disable CSP to allow custom configuration page scripts/styles
@@ -74,16 +72,10 @@ app.get("/:config?/subtitles/:type/:id/:extra?.json", async (req, res) => {
   const { config, type, id, extra } = req.params;
   const userConfig = decodeConfig(config);
 
-  const protocol = req.headers["x-forwarded-proto"] || req.protocol;
-  let host = req.headers["x-forwarded-host"] || req.get("host");
-
-  // Fix for BeamUp: if x-forwarded-proto is present, the proxy is handling SSL.
-  // In many Dokku setups, req.get('host') might still include the internal port (e.g. :5571).
-  // We MUST strip it so the URL used by Stremio is reachable from outside.
-  if (req.headers["x-forwarded-proto"] && host.includes(":")) {
-    host = host.split(":")[0];
-  }
-
+  // Prefer HTTPS (BeamUp uses HTTPS)
+  const protocol =
+    req.headers["x-forwarded-proto"] || (req.secure ? "https" : req.protocol);
+  const host = req.headers["x-forwarded-host"] || req.get("host");
   userConfig.baseUrl = `${protocol}://${host}`;
 
   try {
@@ -101,25 +93,13 @@ app.get("/:config?/subtitles/:type/:id/:extra?.json", async (req, res) => {
       extra: extraObj,
       config: userConfig,
     });
-
-    const subCount = response.subtitles.length;
-    const firstUrl = response.subtitles[0]?.url;
-    console.log(
-      `[SUBS] Served ${subCount} subs for ${id}. First URL: ${
-        firstUrl || "none"
-      }`
-    );
-
     res.set("Cache-Control", "public, max-age=900"); // 15 minutes
     res.json(response);
   } catch (e) {
-    console.error(`[ERROR] Subtitle handler error: ${e.message}`);
     res.status(500).json({ subtitles: [] });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(
-    `🚀 [${new Date().toISOString()}] Addon DEPLOYED with BeamUp Fix - Port ${PORT}`
-  );
+  console.log(`🚀 Addon live on port ${PORT}`);
 });
