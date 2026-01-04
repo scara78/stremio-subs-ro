@@ -3,7 +3,7 @@ const manifest = {
   version: "1.0.0",
   name: "Subs.ro Subtitles",
   description: "Romanian subtitles from Subs.ro (unofficial)",
-  logo: "https://subs.ro/favicon.ico",
+  logo: "https://raw.githubusercontent.com/allecsc/stremio-subs-ro/refs/heads/master/public/logo.png",
   catalogs: [],
   resources: ["subtitles"],
   types: ["movie", "series"],
