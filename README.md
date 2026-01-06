@@ -47,7 +47,7 @@ Licență GPL – vezi [LICENSE](LICENSE) pentru detalii.
 
 ## 🇬🇧 English
 
-A Stremio addon that fetches high-quality Romanian subtitles from [subs.ro](https://subs.ro).
+A Stremio addon that fetches high-quality subtitles from [subs.ro](https://subs.ro). Although the main focus are romanian subtitles, support exists for other languages such as English, Magyar, Italiano, Francais, Espanol and more.
 
 ### 🚀 Installation
 
