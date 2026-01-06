@@ -37,9 +37,16 @@ const decodeConfig = (configStr) => {
   }
 };
 
-app.get("/", (req, res) => res.redirect("/configure.html"));
-app.get("/configure", (req, res) => res.redirect("/configure.html"));
-app.get("/:config/configure", (req, res) => res.redirect("/configure.html"));
+// Serve configure page directly (no redirect - required by addon catalog)
+app.get("/", (req, res) =>
+  res.sendFile(path.join(__dirname, "public", "configure.html"))
+);
+app.get("/configure", (req, res) =>
+  res.sendFile(path.join(__dirname, "public", "configure.html"))
+);
+app.get("/:config/configure", (req, res) =>
+  res.sendFile(path.join(__dirname, "public", "configure.html"))
+);
 
 // Manifest
 app.get("/:config?/manifest.json", (req, res) => {
