@@ -2,7 +2,7 @@ const { addonBuilder } = require("stremio-addon-sdk");
 const SubsRoClient = require("./lib/subsro");
 const { matchesEpisode, calculateMatchScore } = require("./lib/matcher");
 const { listSrtFiles, getArchiveType } = require("./lib/archiveUtils");
-const { globalLimiter } = require("./lib/rateLimiter");
+const { getLimiter } = require("./lib/rateLimiter");
 const manifest = require("./manifest");
 
 const builder = new addonBuilder(manifest);
@@ -58,8 +58,9 @@ async function getArchiveSrtList(apiKey, subId) {
   try {
     const downloadUrl = `https://subs.ro/api/v1.0/subtitle/${subId}/download`;
 
-    // Use rate limiter for safe, queued downloads
-    const buffer = await globalLimiter.downloadArchive(downloadUrl, {
+    // Use per-user rate limiter for safe, queued downloads
+    const limiter = getLimiter(apiKey);
+    const buffer = await limiter.downloadArchive(downloadUrl, {
       headers: { "X-Subs-Api-Key": apiKey },
     });
 
@@ -73,7 +74,7 @@ async function getArchiveSrtList(apiKey, subId) {
       timestamp: Date.now(),
     });
 
-    const status = globalLimiter.getQueueStatus();
+    const status = limiter.getQueueStatus();
     const ts = new Date().toISOString().slice(11, 23);
     console.log(
       `[${ts}] [SUBS] Archive ${subId}: ${
